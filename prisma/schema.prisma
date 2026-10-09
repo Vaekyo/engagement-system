@@ -1,0 +1,272 @@
+// Data model for the AI Engagement Engine (blueprint section 10).
+// Keep audience identity data to the minimum needed: author IDs are stored
+// as keyed hashes, never raw.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform {
+  youtube
+  instagram
+  tiktok
+}
+
+enum ConnectionStatus {
+  connected
+  manual
+  permission_required
+  expired
+  revoked
+  error
+}
+
+enum AccountType {
+  official
+  team
+}
+
+enum AuthorType {
+  creator
+  team
+  audience
+}
+
+enum CommentCategory {
+  question
+  feedback
+  positive
+  needs_review
+  other
+}
+
+enum RecordSource {
+  api
+  manual
+  mock
+}
+
+enum DraftType {
+  starter
+  reply
+}
+
+enum DraftStatus {
+  draft
+  pending_approval
+  approved
+  queued
+  published
+  rejected
+  failed
+  manual_action_required
+  cancelled
+}
+
+enum JobState {
+  queued
+  running
+  retry_scheduled
+  published
+  failed
+  manual_action_required
+  cancelled
+}
+
+enum ExperimentGroup {
+  seeded
+  control
+}
+
+model Creator {
+  id           String   @id @default(cuid())
+  displayName  String
+  passwordHash String
+  settings     Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  accounts          PlatformAccount[]
+  affiliatedAuthors AffiliatedAuthor[]
+
+  @@map("creator")
+}
+
+model PlatformAccount {
+  id                    String           @id @default(cuid())
+  creatorId             String
+  platform              Platform
+  platformUserId        String?
+  handle                String
+  accountType           AccountType      @default(official)
+  encryptedAccessToken  String?
+  encryptedRefreshToken String?
+  tokenExpiresAt        DateTime?
+  scopes                String[]         @default([])
+  connectionStatus      ConnectionStatus @default(manual)
+  lastSyncedAt          DateTime?
+  lastError             String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  creator     Creator      @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  content     Content[]
+  publishJobs PublishJob[]
+
+  @@unique([creatorId, platform, handle])
+  @@index([creatorId])
+  @@map("platform_accounts")
+}
+
+// Known creator-team / affiliate identities. Their comments are counted
+// separately from organic audience activity.
+model AffiliatedAuthor {
+  id               String   @id @default(cuid())
+  creatorId        String
+  platform         Platform
+  externalAuthorId String
+  label            String
+  createdAt        DateTime @default(now())
+
+  creator Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  @@unique([creatorId, platform, externalAuthorId])
+  @@map("affiliated_authors")
+}
+
+model Content {
+  id                String           @id @default(cuid())
+  platformAccountId String
+  externalVideoId   String?
+  url               String
+  title             String?
+  caption           String?
+  creatorNotes      String?
+  transcript        String?
+  publishedAt       DateTime?
+  source            RecordSource     @default(manual)
+  syncStatus        String           @default("manual")
+  experimentGroup   ExperimentGroup?
+  analysis          Json?
+  analyzedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  account   PlatformAccount      @relation(fields: [platformAccountId], references: [id], onDelete: Cascade)
+  comments  Comment[]
+  drafts    AiDraft[]
+  snapshots EngagementSnapshot[]
+
+  @@unique([platformAccountId, externalVideoId])
+  @@index([platformAccountId])
+  @@map("content")
+}
+
+model Comment {
+  id                String          @id @default(cuid())
+  contentId         String
+  externalCommentId String?
+  parentId          String?
+  text              String
+  authorDisplayName String?
+  authorIdHash      String?
+  authorType        AuthorType      @default(audience)
+  category          CommentCategory @default(other)
+  source            RecordSource    @default(manual)
+  replyCount        Int             @default(0)
+  publishedAt       DateTime        @default(now())
+  createdAt         DateTime        @default(now())
+
+  content Content   @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[] @relation("CommentReplies")
+  drafts  AiDraft[]
+
+  @@unique([contentId, externalCommentId])
+  @@index([contentId])
+  @@index([parentId])
+  @@map("comments")
+}
+
+model AiDraft {
+  id              String      @id @default(cuid())
+  contentId       String
+  sourceCommentId String?
+  draftType       DraftType
+  text            String
+  originalText    String
+  rationale       String?
+  status          DraftStatus @default(draft)
+  riskFlags       Json        @default("[]")
+  modelVersion    String
+  approvedAt      DateTime?
+  approvedBy      String?
+  rejectedReason  String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  content       Content     @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  sourceComment Comment?    @relation(fields: [sourceCommentId], references: [id], onDelete: SetNull)
+  publishJob    PublishJob?
+
+  @@index([contentId])
+  @@index([status])
+  @@map("ai_drafts")
+}
+
+model PublishJob {
+  id                String    @id @default(cuid())
+  draftId           String    @unique
+  platform          Platform
+  platformAccountId String
+  approvedAt        DateTime
+  state             JobState  @default(queued)
+  idempotencyKey    String    @unique
+  attempts          Int       @default(0)
+  nextAttemptAt     DateTime  @default(now())
+  lockedAt          DateTime?
+  externalCommentId String?
+  errorCode         String?
+  errorMessage      String?
+  createdAt         DateTime  @default(now())
+  completedAt       DateTime?
+
+  draft   AiDraft         @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  account PlatformAccount @relation(fields: [platformAccountId], references: [id], onDelete: Cascade)
+
+  @@index([state, nextAttemptAt])
+  @@map("publish_jobs")
+}
+
+model EngagementSnapshot {
+  id            String       @id @default(cuid())
+  contentId     String
+  capturedAt    DateTime     @default(now())
+  views         Int?
+  likes         Int?
+  commentsCount Int?
+  source        RecordSource @default(manual)
+
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+
+  @@index([contentId, capturedAt])
+  @@map("engagement_snapshots")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String
+  actor      String
+  targetType String
+  targetId   String?
+  timestamp  DateTime @default(now())
+  metadata   Json     @default("{}")
+
+  @@index([timestamp])
+  @@map("audit_logs")
+}
